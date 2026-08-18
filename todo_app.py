@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+from uuid import uuid4
 
 from fastapi import (
     FastAPI,
@@ -13,13 +15,26 @@ from fastapi import (
 
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from database import engine, Base, SessionLocal
+from database import SessionLocal
 from models import TodoModel
 from datetime import datetime
 from fastapi.staticfiles import StaticFiles
 
 
-# Create FastAPI application
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
+UPLOAD_DIR = Path("uploads")
+
+# Create uploads folder if it doesn't exist
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+# =========================================================
+# FASTAPI APPLICATION
+# =========================================================
+
 app = FastAPI(
     title="Simple Todo API",
     description="A basic Todo application using FastAPI and PostgreSQL",
@@ -27,10 +42,14 @@ app = FastAPI(
 )
 
 
-# Make the uploads folder accessible through the browser
+# =========================================================
+# STATIC FILES
+# =========================================================
+
+# Make uploaded files accessible through the browser
 app.mount(
     "/uploads",
-    StaticFiles(directory="uploads"),
+    StaticFiles(directory=str(UPLOAD_DIR)),
     name="uploads"
 )
 
@@ -38,19 +57,6 @@ app.mount(
 # =========================================================
 # PYDANTIC MODELS
 # =========================================================
-
-class TodoUpdate(BaseModel):
-
-    # New Todo title
-    title: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=100
-    )
-
-    # New completion status
-    completed: bool | None = None
-
 
 class Todo(BaseModel):
 
@@ -88,12 +94,58 @@ def get_db():
     db = SessionLocal()
 
     try:
+
         # Give the session to the endpoint
         yield db
 
     finally:
+
         # Close the session
         db.close()
+
+
+# =========================================================
+# FILE HELPERS
+# =========================================================
+
+async def save_uploaded_file(file: UploadFile) -> str:
+    """Save an uploaded file using a unique filename."""
+
+    # Get original file extension
+    extension = Path(file.filename or "").suffix
+
+    # Generate unique filename
+    unique_filename = f"{uuid4().hex}{extension}"
+
+    # Build physical file path
+    physical_path = UPLOAD_DIR / unique_filename
+
+    # Read uploaded file
+    contents = await file.read()
+
+    # Save file
+    with open(physical_path, "wb") as f:
+        f.write(contents)
+
+    # Return database path
+    return f"uploads/{unique_filename}"
+
+
+def delete_physical_file(file_path: str | None):
+    """Delete a stored file from the uploads folder."""
+
+    if not file_path:
+        return
+
+    # Get only the filename
+    filename = Path(file_path).name
+
+    # Build physical path
+    physical_path = UPLOAD_DIR / filename
+
+    # Delete if it exists
+    if physical_path.exists():
+        physical_path.unlink()
 
 
 # =========================================================
@@ -103,8 +155,9 @@ def get_db():
 @app.get("/")
 def home():
 
-    # Simple health message
-    return {"message": "Todo API is running"}
+    return {
+        "message": "Todo API is running"
+    }
 
 
 # =========================================================
@@ -118,52 +171,39 @@ def home():
 )
 async def create_todo(
 
-    # Todo text from the form
+    # Todo text
     title: str = Form(...),
 
-    # Optional file
+    # Optional uploaded file
     file: UploadFile | None = File(None),
 
     # Database session
     db: Session = Depends(get_db)
 ):
 
-    # Start with no file path
+    # Start with no file
     file_path = None
 
-    # If the user uploaded a file
+    # Save file if provided
     if file is not None:
+        file_path = await save_uploaded_file(file)
 
-        # Create uploads folder if it doesn't exist
-        os.makedirs("uploads", exist_ok=True)
-
-        # Create the file path
-        file_path = f"uploads/{file.filename}"
-
-        # Read the uploaded file
-        contents = await file.read()
-
-        # Save the actual file
-        with open(file_path, "wb") as f:
-            f.write(contents)
-
-    # Create ONE Todo database record
+    # Create Todo
     todo = TodoModel(
         title=title,
         completed=False,
         file_path=file_path
     )
 
-    # Add Todo to database session
+    # Add to database
     db.add(todo)
 
-    # Save to PostgreSQL
+    # Save
     db.commit()
 
-    # Get generated Todo ID
+    # Refresh
     db.refresh(todo)
 
-    # Return the ONE Todo
     return todo
 
 
@@ -180,7 +220,7 @@ def get_todos(
     db: Session = Depends(get_db)
 ):
 
-    # Query all Todos
+    # Start query
     query = db.query(TodoModel)
 
     # Apply completion filter
@@ -189,10 +229,9 @@ def get_todos(
             TodoModel.completed == completed
         )
 
-    # Get results
+    # Get Todos
     todo_list = query.all()
 
-    # Return Todos
     return todo_list
 
 
@@ -206,30 +245,47 @@ def get_todo(
     db: Session = Depends(get_db)
 ):
 
-    # Find Todo by ID
+    # Find Todo
     todo = db.query(TodoModel).filter(
         TodoModel.id == todo_id
     ).first()
 
-    # If not found
+    # Todo doesn't exist
     if todo is None:
         raise HTTPException(
             status_code=404,
             detail="Todo not found"
         )
 
-    # Return Todo
     return todo
 
 
 # =========================================================
-# UPDATE TODO
+# UPDATE TODO + OPTIONAL FILE
 # =========================================================
 
-@app.put("/todos/{todo_id}", response_model=Todo)
-def update_todo(
+@app.put(
+    "/todos/{todo_id}",
+    response_model=Todo
+)
+async def update_todo(
+
+    # Todo ID
     todo_id: int,
-    todo_data: TodoUpdate,
+
+    # Optional new title
+    title: str | None = Form(None),
+
+    # Optional completion status
+    completed: bool | None = Form(None),
+
+    # Optional replacement file
+    file: UploadFile | None = File(None),
+
+    # Whether to remove the current file
+    remove_file: bool = Form(False),
+
+    # Database session
     db: Session = Depends(get_db)
 ):
 
@@ -238,28 +294,63 @@ def update_todo(
         TodoModel.id == todo_id
     ).first()
 
-    # If not found
+    # Todo doesn't exist
     if todo is None:
         raise HTTPException(
             status_code=404,
             detail="Todo not found"
         )
 
-    # Update title if provided
-    if todo_data.title is not None:
-        todo.title = todo_data.title
+    # Update title
+    if title is not None:
 
-    # Update completion status if provided
-    if todo_data.completed is not None:
-        todo.completed = todo_data.completed
+        if not title.strip():
+
+            raise HTTPException(
+                status_code=400,
+                detail="Todo title cannot be empty"
+            )
+
+        todo.title = title
+
+    # Update completion status
+    if completed is not None:
+        todo.completed = completed
+
+    # -----------------------------------------------------
+    # FILE HANDLING
+    # -----------------------------------------------------
+
+    # If a new file is uploaded
+    if file is not None:
+
+        # Remember old file
+        old_file_path = todo.file_path
+
+        # Save new file
+        new_file_path = await save_uploaded_file(file)
+
+        # Update database path
+        todo.file_path = new_file_path
+
+        # Delete old file
+        delete_physical_file(old_file_path)
+
+    # Otherwise, remove existing file if requested
+    elif remove_file:
+
+        # Delete physical file
+        delete_physical_file(todo.file_path)
+
+        # Remove database reference
+        todo.file_path = None
 
     # Save changes
     db.commit()
 
-    # Refresh Todo
+    # Refresh
     db.refresh(todo)
 
-    # Return Todo
     return todo
 
 
@@ -278,20 +369,21 @@ def delete_todo(
         TodoModel.id == todo_id
     ).first()
 
-    # If not found
     if todo is None:
         raise HTTPException(
             status_code=404,
             detail="Todo not found"
         )
 
-    # Delete Todo
+    # Delete attached physical file
+    delete_physical_file(todo.file_path)
+
+    # Delete database record
     db.delete(todo)
 
-    # Save deletion
+    # Save
     db.commit()
 
-    # Return confirmation
     return {
         "message": "Todo deleted successfully"
     }
@@ -306,17 +398,20 @@ def delete_all_todos(
     db: Session = Depends(get_db)
 ):
 
-    # Get all Todo records
+    # Get all Todos
     todos = db.query(TodoModel).all()
 
-    # Delete every Todo
+    # Delete physical files
+    for todo in todos:
+        delete_physical_file(todo.file_path)
+
+    # Delete database records
     for todo in todos:
         db.delete(todo)
 
-    # Save the deletion
+    # Save
     db.commit()
 
-    # Return confirmation
     return {
         "message": "All Todos deleted successfully"
     }

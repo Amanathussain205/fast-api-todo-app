@@ -1,7 +1,6 @@
-from pathlib import Path
-
-frontend_code = '''import streamlit as st
+import streamlit as st
 import requests
+from urllib.parse import quote
 
 
 # =========================================================
@@ -31,25 +30,22 @@ def get_todos():
 def create_todo(title, file):
     """Create one Todo with optional file."""
 
-    # Todo text is sent as form data
     data = {
         "title": title
     }
 
-    # No file by default
     files = None
 
-    # Add the optional file
     if file is not None:
+
         files = {
             "file": (
                 file.name,
-                file,
+                file.getvalue(),
                 file.type
             )
         }
 
-    # Send text and optional file in ONE request
     response = requests.post(
         f"{API_URL}/todos",
         data=data,
@@ -59,15 +55,38 @@ def create_todo(title, file):
     return response
 
 
-def update_todo(todo_id, title, completed):
-    """Update an existing Todo."""
+def update_todo(
+    todo_id,
+    title,
+    completed,
+    file=None,
+    remove_file=False
+):
+    """Update Todo title, status and optional file."""
+
+    data = {
+        "title": title,
+        "completed": str(completed).lower(),
+        "remove_file": str(remove_file).lower()
+    }
+
+    files = None
+
+    # Add replacement file if provided
+    if file is not None:
+
+        files = {
+            "file": (
+                file.name,
+                file.getvalue(),
+                file.type
+            )
+        }
 
     response = requests.put(
         f"{API_URL}/todos/{todo_id}",
-        json={
-            "title": title,
-            "completed": completed
-        }
+        data=data,
+        files=files
     )
 
     return response
@@ -156,18 +175,16 @@ st.subheader("➕ Add New Todo")
 
 with st.form("add_todo_form"):
 
-    # One Post field for the Todo text
     title = st.text_input(
         "Post",
         placeholder="Write your Todo..."
     )
 
-    # Optional image/file attachment
     uploaded_file = st.file_uploader(
-        "Attach an image or file (optional)"
+        "Attach an image or file (optional)",
+        key="new_todo_file"
     )
 
-    # Submit button
     submitted = st.form_submit_button(
         "Add Todo",
         use_container_width=True
@@ -175,14 +192,12 @@ with st.form("add_todo_form"):
 
     if submitted:
 
-        # Require Todo text
         if not title.strip():
 
             st.warning("Please enter a Todo.")
 
         else:
 
-            # Send text + optional file together
             response = create_todo(
                 title,
                 uploaded_file
@@ -225,7 +240,6 @@ filter_option = st.radio(
 )
 
 
-# Filter Todos on the frontend
 if filter_option == "Pending":
 
     displayed_todos = [
@@ -291,8 +305,6 @@ else:
 
     for todo in displayed_todos:
 
-        # These variables exist only inside this loop
-        # so Pylance will not report them as possibly unbound.
         todo_id = todo["id"]
         title = todo["title"]
         completed = todo["completed"]
@@ -300,9 +312,9 @@ else:
 
         with st.container(border=True):
 
-            # -------------------------------------------------
+            # =================================================
             # TODO INFORMATION
-            # -------------------------------------------------
+            # =================================================
 
             if completed:
 
@@ -321,22 +333,29 @@ else:
                 st.warning("⏳ Pending")
 
 
-            # -------------------------------------------------
+            # =================================================
             # ATTACHED FILE
-            # -------------------------------------------------
+            # =================================================
 
             if file_path:
 
-                # Convert the database path into a browser URL
-                file_url = (
-                    f"{API_URL}/{file_path}"
-                    .replace("\\\\", "/")
+                # Get filename from database path
+                filename = file_path.split("/")[-1]
+
+                # URL-encode filename
+                encoded_filename = quote(
+                    filename,
+                    safe=""
                 )
 
-                # Show image directly when possible
-                lower_path = file_path.lower()
+                # Create proper browser URL
+                file_url = (
+                    f"{API_URL}/uploads/{encoded_filename}"
+                )
 
-                if lower_path.endswith(
+                lower_filename = filename.lower()
+
+                if lower_filename.endswith(
                     (".png", ".jpg", ".jpeg", ".gif", ".webp")
                 ):
 
@@ -352,14 +371,17 @@ else:
                     )
 
 
-            # -------------------------------------------------
+            # =================================================
             # BUTTONS
-            # -------------------------------------------------
+            # =================================================
 
             col1, col2, col3 = st.columns(3)
 
 
-            # Complete / Uncomplete
+            # =================================================
+            # COMPLETE / UNCOMPLETE
+            # =================================================
+
             with col1:
 
                 if completed:
@@ -386,11 +408,15 @@ else:
                     else:
 
                         st.error(
-                            "Failed to update Todo."
+                            f"Failed to update Todo: "
+                            f"{response.text}"
                         )
 
 
-            # Edit
+            # =================================================
+            # EDIT
+            # =================================================
+
             with col2:
 
                 if st.button(
@@ -406,7 +432,10 @@ else:
                     st.rerun()
 
 
-            # Delete
+            # =================================================
+            # DELETE
+            # =================================================
+
             with col3:
 
                 if st.button(
@@ -430,20 +459,25 @@ else:
                     else:
 
                         st.error(
-                            "Failed to delete Todo."
+                            f"Failed to delete Todo: "
+                            f"{response.text}"
                         )
 
 
-            # -------------------------------------------------
+            # =================================================
             # EDIT FORM
-            # -------------------------------------------------
+            # =================================================
 
             if st.session_state.get(
                 f"editing_{todo_id}",
                 False
             ):
 
-                st.markdown("#### Edit Todo")
+                st.markdown("#### ✏️ Edit Todo")
+
+                # ---------------------------------------------
+                # TITLE
+                # ---------------------------------------------
 
                 new_title = st.text_input(
                     "Todo title",
@@ -451,14 +485,42 @@ else:
                     key=f"title_input_{todo_id}"
                 )
 
+
+                # ---------------------------------------------
+                # FILE REPLACEMENT
+                # ---------------------------------------------
+
+                new_file = st.file_uploader(
+                    "Replace attached file (optional)",
+                    key=f"file_input_{todo_id}"
+                )
+
+
+                # ---------------------------------------------
+                # REMOVE EXISTING FILE
+                # ---------------------------------------------
+
+                remove_file = False
+
+                if file_path:
+
+                    remove_file = st.checkbox(
+                        "🗑️ Remove current attached file",
+                        key=f"remove_file_{todo_id}"
+                    )
+
+
                 edit_col1, edit_col2 = st.columns(2)
 
 
-                # Save
+                # =================================================
+                # SAVE
+                # =================================================
+
                 with edit_col1:
 
                     if st.button(
-                        "💾 Save",
+                        "💾 Save Changes",
                         key=f"save_{todo_id}",
                         use_container_width=True
                     ):
@@ -469,12 +531,21 @@ else:
                                 "Todo title cannot be empty."
                             )
 
+                        elif new_file is not None and remove_file:
+
+                            st.warning(
+                                "Choose either a replacement "
+                                "file OR remove the current file."
+                            )
+
                         else:
 
                             response = update_todo(
                                 todo_id,
                                 new_title,
-                                completed
+                                completed,
+                                new_file,
+                                remove_file
                             )
 
                             if response.status_code == 200:
@@ -492,11 +563,15 @@ else:
                             else:
 
                                 st.error(
-                                    "Failed to update Todo."
+                                    f"Failed to update Todo: "
+                                    f"{response.text}"
                                 )
 
 
-                # Cancel
+                # =================================================
+                # CANCEL
+                # =================================================
+
                 with edit_col2:
 
                     if st.button(
@@ -510,9 +585,3 @@ else:
                         ] = False
 
                         st.rerun()
-'''
-
-output_path = Path("/mnt/data/frontend_fixed.py")
-output_path.write_text(frontend_code, encoding="utf-8")
-
-print(f"Created: {output_path}")
