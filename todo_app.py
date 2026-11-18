@@ -15,7 +15,7 @@ from fastapi import (
 
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from database import SessionLocal
+from database import SessionLocal, Base, engine
 from models import TodoModel
 from datetime import datetime
 from fastapi.staticfiles import StaticFiles
@@ -29,6 +29,10 @@ UPLOAD_DIR = Path("uploads")
 
 # Create uploads folder if it doesn't exist
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+# Create database tables if they don't exist yet
+Base.metadata.create_all(bind=engine)
 
 
 # =========================================================
